@@ -9,6 +9,7 @@ import traceback, sys
 from processor import Session, Dispatcher
 from utils import print_log
 
+import ssl
 
 class TcpSession(Session):
 
@@ -23,7 +24,7 @@ class TcpSession(Session):
                 certfile=ssl_certfile,
                 keyfile=ssl_keyfile,
                 ssl_version=ssl.PROTOCOL_SSLv23,
-                do_handshake_on_connect=True)
+                do_handshake_on_connect=False)
         else:
             self._connection = connection
 
@@ -76,13 +77,28 @@ class TcpClientResponder(threading.Thread):
             except queue.Empty:
                 continue
 
+            if session.stopped():
+                continue
+
             data = json.dumps(response) + "\n"
             try:
                 while data:
                     l = session._connection.send(data)
                     data = data[l:]
+
+            except ssl.SSLError as err:
+                if err.args[0] == ssl.SSL_ERROR_WANT_READ:
+                    #select.select([self.s], [], [])
+                    print "error, want read"
+                elif err.args[0] == ssl.SSL_ERROR_WANT_WRITE:
+                    #select.select([], [self.s], [])
+                    print "error, want write"
+                else:
+                    print "other error", err
+                session.stop()
             except:
-                print "error during send", session.address
+                print "error during send", session.address, response
+                traceback.print_exc(file=sys.stdout)
                 session.stop()
 
 
@@ -109,14 +125,7 @@ class TcpServer(threading.Thread):
         self.buffer_size = 4096
 
 
-    def on_accept(self):
-        try:
-            connection, address = self.s.accept()
-        except:
-            traceback.print_exc(file=sys.stdout)
-            time.sleep(0.1)
-            return
-
+    def on_accept(self, connection):
         q = self.responder.response_queue
         try:
             session = TcpSession(self.dispatcher, q, connection, address, use_ssl=self.use_ssl, ssl_certfile=self.ssl_certfile, ssl_keyfile=self.ssl_keyfile)
@@ -126,8 +135,23 @@ class TcpServer(threading.Thread):
             connection.close()
             time.sleep(0.1)
             return
+
+        if self.use_ssl:
+            import ssl
+            while True:
+                try:
+                    session.do_handshake()
+                    break
+                except ssl.SSLError as err:
+                    if err.args[0] == ssl.SSL_ERROR_WANT_READ:
+                        select.select([self.s], [], [])
+                        print "error, want read"
+                    elif err.args[0] == ssl.SSL_ERROR_WANT_WRITE:
+                        select.select([], [self.s], [])
+                        print "error, want write"
+                    else:
+                        raise
              
-        self.input_list.append(connection)
         self.session_list[connection] = session
 
 
@@ -192,24 +216,32 @@ class TcpServer(threading.Thread):
 
         print_log( ("SSL" if self.use_ssl else "TCP") + " server started on port %d"%self.port)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setblocking(0)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((self.host, self.port))
         sock.listen(5)
-        self.input_list.append(sock)
+
+        poller = select.poll()
+        poller.register(sock)
+
+        # Map file descriptors to socket objects
+        fd_to_socket = { server.fileno(): server }
 
         while not self.shared.stopped():
-            time.sleep(self.delay)
-            try:
-                inputready, outputready, exceptready = select.select(self.input_list, [], [])
-            except socket.error:
-                traceback.print_exc(file=sys.stdout)
-                time.sleep(1)
-                continue
 
-            for self.s in inputready:
-                if self.s == sock:
-                    self.on_accept()
-                    break
+            events = poller.poll(timeout = self.delay)
+            for fd, flags in events:
+                s = fd_to_socket[fd]
+
+                # handle inputs
+                if flags & (select.POLLIN | select.POLLPRI):
+
+                    if s == sock:
+                        connection, client_address = s.accept()
+                        connection.setblocking(0)
+                        fd_to_socket[ connection.fileno() ] = connection
+                        self.on_accept(s)
+                        break
                 
                 self.session = self.session_list[self.s]
                 try:
@@ -218,6 +250,7 @@ class TcpServer(threading.Thread):
                     self.data = ''
 
                 if len(self.data) == 0:
+                    poller.unregister(self.s)
                     self.on_close()
                 else:
                     self.on_recv()
