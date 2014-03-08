@@ -139,9 +139,6 @@ class TcpServer(threading.Thread):
 
     def run(self):
 
-        #self.responder = TcpClientResponder(self.shared)
-        #self.responder.start()
-
         print_log( ("SSL" if self.use_ssl else "TCP") + " server started on port %d"%self.port)
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.setblocking(0)
@@ -156,10 +153,20 @@ class TcpServer(threading.Thread):
         fd_to_socket = { server.fileno(): server }
         session_list = {}
         
+        def stop_session(s):
+            try:
+                # unregister before we close s 
+                poller.unregister(s)
+            except:
+                print_log("unregister error", s)
+            # this will close s
+            session = session_list.pop(s)
+            session.stop()
+
+
         while not self.shared.stopped():
 
             events = poller.poll(TIMEOUT)
-            
             for fd, flag in events:
 
                 s = fd_to_socket[fd]
@@ -182,7 +189,7 @@ class TcpServer(threading.Thread):
                         else:
                             try:
                                 session.do_handshake()
-                            except socket.error:
+                            except:
                                 print_log("SSL handshake failure", address)
                                 continue
 
@@ -220,20 +227,13 @@ class TcpServer(threading.Thread):
                             self.handle_command(cmd, session)
 
                     if not data:
-                        poller.unregister(s)
-                        session.stop()
-                        s.close()
-                        del session_list[s]
+                        stop_session(s)
                         continue
 
                 elif flag & select.POLLHUP:
-                    # Client hung up
-                    print 'closing', address, 'after receiving HUP'
-                    # Stop listening for input on the connection
-                    poller.unregister(s)
-                    s.close()
-                    session.stop()
-                    del session_list[s]
+                    print_log( 'client hung up', address )
+                    stop_session(s)
+
 
                 elif flag & select.POLLOUT:
                     # Socket is ready to send data, if there is any to send.
@@ -253,14 +253,10 @@ class TcpServer(threading.Thread):
 
                 elif flag & select.POLLERR:
                     print 'handling exceptional condition for', session.address
-                    # Stop listening for input on the connection
-                    try:
-                        poller.unregister(s)
-                        s.close()
-                    except:
-                        pass
-                    session.stop()
-                    del session_list[s]
+                    stop_session(s)
 
 
+                elif flag & select.POLLNVAL:
+                    print 'invalid request', session.address
+                    stop_session(s)
     
