@@ -180,7 +180,12 @@ class TcpServer(threading.Thread):
                             connection.close()
 
                         else:
-                            session.do_handshake()
+                            try:
+                                session.do_handshake()
+                            except socket.error:
+                                print_log("SSL handshake failure", address)
+                                continue
+
                             connection = session._connection
                             connection.setblocking(0)
                             fd_to_socket[ connection.fileno() ] = connection
@@ -247,10 +252,13 @@ class TcpServer(threading.Thread):
 
 
                 elif flag & select.POLLERR:
-                    print 'handling exceptional condition for', s.getpeername()
+                    print 'handling exceptional condition for', session.address
                     # Stop listening for input on the connection
-                    poller.unregister(s)
-                    s.close()
+                    try:
+                        poller.unregister(s)
+                        s.close()
+                    except:
+                        pass
                     session.stop()
                     del session_list[s]
 
