@@ -210,9 +210,7 @@ class TcpServer(threading.Thread):
                             raise x
                     except socket.error as x:
                         print "recv err", x
-                        session.stop()
-                        s.close()
-                        del session_list[s]
+                        stop_session(s)
                         continue
 
                     if data:
